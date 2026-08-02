@@ -6,6 +6,7 @@ enum Workspace: String, CaseIterable, Identifiable {
     case keywords = "Keywords"
     case metadata = "Metadata"
     case revenue = "Revenue"
+    case impact = "Impact"
     case discover = "Discover"
     case competitors = "Competitors"
     case alerts = "Alerts"
@@ -17,6 +18,7 @@ enum Workspace: String, CaseIterable, Identifiable {
         case .keywords: return "magnifyingglass"
         case .metadata: return "doc.text"
         case .revenue: return "chart.line.uptrend.xyaxis"
+        case .impact: return "checkmark.seal"
         case .discover: return "globe"
         case .competitors: return "person.2"
         case .alerts: return "bell"
@@ -115,6 +117,7 @@ struct ContentView: View {
         case .keywords: KeywordsView()
         case .metadata: MetadataView()
         case .revenue: RevenueView()
+        case .impact: ImpactView()
         case .discover: DiscoverView()
         case .competitors: CompetitorsView()
         case .alerts: AlertsView()

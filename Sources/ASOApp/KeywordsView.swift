@@ -255,6 +255,22 @@ struct KeywordsView: View {
                             }
                         }
                     }
+
+                    // Metadata changes drawn onto the same axis. This is the
+                    // whole point of keeping rank history: not "where do I
+                    // rank" but "did the change I made move anything".
+                    ForEach(state.impacts) { impact in
+                        RuleMark(x: .value("Changed", impact.event.occurredAt))
+                            .foregroundStyle(.secondary.opacity(0.5))
+                            .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
+                            .annotation(position: .top, alignment: .leading) {
+                                Text(impact.event.field.displayName)
+                                    .font(.system(size: 9))
+                                    .padding(.horizontal, 4).padding(.vertical, 1)
+                                    .background(.quaternary, in: Capsule())
+                                    .help(impact.event.summary + "\n\n" + impact.verdict)
+                            }
+                    }
                 }
                 // Rank 1 is best, so the axis is inverted: up means improving.
                 .chartYScale(domain: .automatic(includesZero: false, reversed: true))

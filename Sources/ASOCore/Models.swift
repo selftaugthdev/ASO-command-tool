@@ -175,3 +175,31 @@ public struct MetadataDiff: Identifiable, Hashable, Sendable {
         self.local = local
     }
 }
+
+/// Maps App Store Connect locales to iTunes storefront codes.
+///
+/// Ranks are per storefront, metadata is per locale, and the two use different
+/// identifiers. Without this, a change to `nl-NL` cannot be compared against
+/// ranks in the `nl` store.
+public enum Locales {
+    private static let overrides: [String: String] = [
+        "en-US": "us", "en-GB": "gb", "en-AU": "au", "en-CA": "ca",
+        "nl-NL": "nl", "nl-BE": "be", "de-DE": "de", "fr-FR": "fr",
+        "fr-CA": "ca", "es-ES": "es", "es-MX": "mx", "it": "it",
+        "pt-BR": "br", "pt-PT": "pt", "ja": "jp", "ko": "kr",
+        "zh-Hans": "cn", "zh-Hant": "tw", "ru": "ru", "tr": "tr",
+        "sv": "se", "da": "dk", "no": "no", "fi": "fi", "pl": "pl",
+        "cs": "cz", "el": "gr", "he": "il", "hi": "in", "id": "id",
+        "ms": "my", "th": "th", "vi": "vn", "uk": "ua", "ar-SA": "sa",
+    ]
+
+    public static func country(for locale: String) -> String {
+        if let mapped = overrides[locale] { return mapped }
+        // Fall back to the region subtag when present ("de-AT" -> "at"),
+        // otherwise the language itself, which is right often enough
+        // ("it" -> "it") to beat guessing.
+        let parts = locale.split(separator: "-")
+        if parts.count > 1 { return parts[1].lowercased() }
+        return locale.lowercased()
+    }
+}

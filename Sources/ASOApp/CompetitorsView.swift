@@ -10,13 +10,34 @@ struct CompetitorsView: View {
     @State private var overlap: CompetitorOverlap?
     @State private var selectedCompetitorId: String?
 
+    @State private var mode: Mode = .ownership
+
+    enum Mode: String, CaseIterable, Identifiable {
+        case ownership = "Who owns your keywords"
+        case analysis = "Analyse one competitor"
+        var id: String { rawValue }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
-            addBar
+            Picker("", selection: $mode) {
+                ForEach(Mode.allCases) { Text($0.rawValue).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
             Divider()
-            HSplitView {
-                list.frame(minWidth: 240, maxWidth: 320)
-                detail.frame(minWidth: 460)
+
+            if mode == .ownership {
+                KeywordOwnershipView()
+            } else {
+                addBar
+                Divider()
+                HSplitView {
+                    list.frame(minWidth: 240, maxWidth: 320)
+                    detail.frame(minWidth: 460)
+                }
             }
         }
         .task { reload() }

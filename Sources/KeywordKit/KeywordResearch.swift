@@ -263,6 +263,16 @@ public final class KeywordResearcher: @unchecked Sendable {
                                             difficulty: difficulty,
                                             competitors: results.count)
 
+                // Record who else is in these results. Free: the response is
+                // already in hand, and it is what makes competitor ownership
+                // answerable without probing competitors separately.
+                try store.recordSERP(
+                    keywordId: keyword.id,
+                    entries: results.prefix(10).enumerated().map { index, result in
+                        (rank: index + 1, appId: result.id, name: result.name,
+                         ratingCount: result.ratingCount)
+                    })
+
                 outcome.refreshed += 1
                 consecutiveFailures = 0
             } catch is CancellationError {

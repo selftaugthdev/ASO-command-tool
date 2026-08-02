@@ -140,6 +140,44 @@ public enum Schema {
         );
         CREATE INDEX IF NOT EXISTS idx_alerts_time ON alerts(created_at DESC);
         """),
+
+        (2, """
+        -- Discrete metadata change events, so a rank chart can show what was
+        -- changed and when.
+        --
+        -- Derived from diffing snapshots would work, but recording the event
+        -- explicitly captures something a diff cannot: whether the change came
+        -- from a push made here (exact timestamp known, because we made it) or
+        -- was noticed later having been edited directly in App Store Connect.
+        CREATE TABLE IF NOT EXISTS metadata_events (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            app_id      TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+            locale      TEXT NOT NULL,
+            field       TEXT NOT NULL,
+            old_value   TEXT,
+            new_value   TEXT,
+            source      TEXT NOT NULL DEFAULT 'push',   -- push | detected
+            occurred_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_metadata_events_app
+            ON metadata_events(app_id, occurred_at DESC);
+
+        -- Who else appears in the results for each tracked keyword.
+        --
+        -- Only the latest reading per keyword is kept: this answers "who owns
+        -- my keyword set right now", and retaining a daily history would add
+        -- tens of thousands of rows a day to answer a question nobody asks.
+        CREATE TABLE IF NOT EXISTS serp_entries (
+            keyword_id   INTEGER NOT NULL REFERENCES keywords(id) ON DELETE CASCADE,
+            rank         INTEGER NOT NULL,
+            app_id       TEXT NOT NULL,
+            app_name     TEXT NOT NULL,
+            rating_count INTEGER,
+            captured_at  INTEGER NOT NULL,
+            PRIMARY KEY (keyword_id, rank)
+        );
+        CREATE INDEX IF NOT EXISTS idx_serp_app ON serp_entries(app_id);
+        """),
     ]
 
     /// Applies any migrations newer than the database's current user_version.

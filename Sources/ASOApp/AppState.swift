@@ -30,6 +30,8 @@ final class AppState {
     var roasRows: [KeywordROAS] = []
     var alerts: [ASOAlert] = []
     var opportunities: [LocaleOpportunity] = []
+    var impacts: [ChangeImpact] = []
+    var presence: [CompetitorPresence] = []
     var diagnostic: AttributionDiagnostic?
 
     /// Metadata pulled from ASC, and the user's in-progress edits.
@@ -127,6 +129,23 @@ final class AppState {
         alerts = (try? store.alerts(limit: 50)) ?? []
     }
 
+    /// Change events for the selected app, each scored against rank movement.
+    func reloadImpacts() {
+        guard let appId = selectedAppId else { impacts = []; return }
+        let country = selectedCountry
+        // Only events for locales served by the selected storefront can be
+        // judged against its ranks; a German edit says nothing about US ranks.
+        let events = ((try? store.metadataEvents(appId: appId)) ?? [])
+            .filter { Locales.country(for: $0.locale) == country }
+        impacts = events.compactMap { try? store.impact(of: $0, country: country) }
+    }
+
+    func reloadCompetitorPresence() {
+        guard let appId = selectedAppId else { presence = []; return }
+        presence = (try? store.competitorPresence(appId: appId,
+                                                  country: selectedCountry)) ?? []
+    }
+
     func reloadRevenue(days: Int = 30) {
         guard let appId = selectedAppId else { roasRows = []; return }
         let since = Date().addingTimeInterval(-Double(days) * 86_400)
@@ -167,8 +186,33 @@ final class AppState {
             let snapshot = try await client.fetchMetadata(for: app)
             self.snapshot = snapshot
             self.edits = snapshot.metadata
+
+            // Anything that differs from the last snapshot but was not pushed
+            // from here was changed in App Store Connect directly. Recording it
+            // as `detected` keeps the timeline honest: the value is right, the
+            // timestamp is when it was noticed, not when it happened.
+            var detected = 0
+            for (locale, entry) in snapshot.metadata {
+                for (field, newValue) in entry.values {
+                    guard let previous = try self.store.lastSnapshot(
+                        appId: app.id, locale: locale, field: field) else { continue }
+                    guard previous.value != newValue else { continue }
+                    try self.store.recordMetadataEvent(
+                        appId: app.id, locale: locale, field: field,
+                        oldValue: previous.value, newValue: newValue, source: .detected)
+                    detected += 1
+                }
+            }
+
             // Record what was live, so any push can be reversed later.
             try self.store.recordSnapshot(appId: app.id, metadata: snapshot.metadata)
+            self.reloadImpacts()
+
+            if detected > 0 {
+                return .info("Pulled \(snapshot.locales.count) locale(s). Noticed "
+                           + "\(detected) field(s) changed outside this app — added to "
+                           + "the change timeline.")
+            }
 
             if snapshot.editableVersion == nil {
                 return .warning("Pulled \(snapshot.locales.count) locale(s). No editable "
@@ -198,6 +242,19 @@ final class AppState {
         await run("Pushing metadata") {
             let client = try self.ascClient()
             let report = try await client.push(plan.confirmed())
+
+            // Record what changed, at the moment it changed. This is the one
+            // thing a tool that only observes cannot know: it made the change,
+            // so the timestamp and the exact before/after are exact rather
+            // than inferred from a version number appearing later.
+            let succeeded = Set(report.succeeded.map(\.operation.id))
+            for diff in plan.diffs where diff.isChanged {
+                let operationId = "\(diff.locale).\(diff.field.container == .appInfo ? "info" : "version")"
+                guard succeeded.contains(operationId) else { continue }
+                try self.store.recordMetadataEvent(
+                    appId: plan.appId, locale: diff.locale, field: diff.field,
+                    oldValue: diff.remote, newValue: diff.local, source: .push)
+            }
             // Re-pull so the diff view reflects what Apple actually stored.
             if let app = self.selectedApp {
                 let fresh = try await client.fetchMetadata(for: app)
