@@ -29,6 +29,7 @@ final class AppState {
     var rankHistory: [Int64: [RankPoint]] = [:]
     var roasRows: [KeywordROAS] = []
     var alerts: [ASOAlert] = []
+    var opportunities: [LocaleOpportunity] = []
     var diagnostic: AttributionDiagnostic?
 
     /// Metadata pulled from ASC, and the user's in-progress edits.
@@ -445,6 +446,81 @@ final class AppState {
             }
         }
         return raised
+    }
+
+    // MARK: - Cross-locale discovery
+
+    /// Searches non-English storefronts for keyword openings.
+    func findOpportunities(storefronts: [Storefront], seeds: [String],
+                           maxCandidates: Int) async {
+        guard let app = selectedApp, !storefronts.isEmpty, !seeds.isEmpty else { return }
+
+        let totalRequests = LocaleOpportunityFinder.estimatedRequests(
+            seedCount: seeds.count,
+            storefronts: storefronts.count,
+            candidatesPerStorefront: maxCandidates)
+        beginProgress(label: "Searching \(storefronts.count) storefront(s)",
+                      total: totalRequests)
+
+        await run("Finding localized openings") {
+            let finder = LocaleOpportunityFinder(
+                asa: self.hasASACredentials ? try? self.asaClient() : nil)
+
+            var found: [LocaleOpportunity] = []
+            var completed = 0
+
+            for storefront in storefronts {
+                let baseline = completed
+                let results = try await finder.discover(
+                    for: app,
+                    storefront: storefront,
+                    seedTerms: seeds,
+                    maxCandidates: maxCandidates,
+                    onProgress: { [weak self] done, _ in
+                        await self?.updateProgress(completed: baseline + done,
+                                                   total: totalRequests)
+                    })
+                found.append(contentsOf: results)
+                completed += seeds.count + maxCandidates
+            }
+
+            self.opportunities = found.sorted { $0.score > $1.score }
+
+            let measured = found.filter(\.demandIsMeasured).count
+            let winnable = found.filter { $0.difficulty < 40 && $0.ourRank == nil }.count
+            var note = "Found \(found.count) candidate(s), \(winnable) with low "
+                     + "difficulty and no current position."
+            if measured == 0 && !self.hasASACredentials {
+                note += " Demand is the title-targeting proxy, not Apple's index — "
+                      + "connect Search Ads for measured popularity."
+            }
+            return found.isEmpty ? .info("No candidates found.") : .success(note)
+        }
+    }
+
+    /// Adds a discovered term to tracking for its own storefront.
+    func trackOpportunity(_ opportunity: LocaleOpportunity) {
+        guard let app = selectedApp else { return }
+        do {
+            let id = try store.addKeyword(appId: app.id, term: opportunity.term,
+                                          country: opportunity.country)
+            // The discovery run already measured these, so store them rather
+            // than making the next refresh recompute what is known.
+            try store.updateMetrics(keywordId: id,
+                                    popularity: opportunity.popularity,
+                                    difficulty: opportunity.difficulty,
+                                    competitors: opportunity.competitorCount,
+                                    source: opportunity.demandIsMeasured
+                                        ? MetricSource.appleSearchAds.rawValue
+                                        : MetricSource.derived.rawValue)
+            try store.recordRank(keywordId: id, rank: opportunity.ourRank)
+            opportunities.removeAll { $0.id == opportunity.id }
+            reloadKeywords()
+            report(.success, "Tracking \"\(opportunity.term)\" in "
+                           + opportunity.country.uppercased())
+        } catch {
+            report(.error, "Could not track: \(error.localizedDescription)")
+        }
     }
 
     // MARK: - Pruning
