@@ -1,0 +1,22 @@
+# Build output
+.build/
+dist/
+
+# Intermediate icon assets; AppIcon.icns is the committed artifact
+Resources/AppIcon.iconset/
+
+# Local-only tool settings
+.claude/settings.local.json
+
+# Never commit credentials. The app stores these in the macOS Keychain, but a
+# .p8 or service account JSON dropped into the working tree must not be tracked.
+*.p8
+*.pem
+*.key
+serviceAccount*.json
+.env
+.env.*
+Firebase/.firebaserc
+Firebase/functions/node_modules/
+
+.DS_Store

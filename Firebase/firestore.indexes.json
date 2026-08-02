@@ -1,0 +1,22 @@
+{
+  "indexes": [
+    {
+      "//": "The Mac app queries events newer than a cutoff, ordered by time.",
+      "collectionGroup": "revenuecat_events",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "occurredAt", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "//": "Per-app sync, used when only one app is being refreshed.",
+      "collectionGroup": "revenuecat_events",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "appId", "order": "ASCENDING" },
+        { "fieldPath": "occurredAt", "order": "ASCENDING" }
+      ]
+    }
+  ],
+  "fieldOverrides": []
+}
