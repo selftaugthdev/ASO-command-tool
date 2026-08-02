@@ -102,6 +102,8 @@ public final class HTTPClient: @unchecked Sendable {
     private let session: URLSession
     private let limiter: RateLimiter
     private let config: HTTPClientConfig
+    /// Server-reported budget, populated from Apple's `X-Rate-Limit` header.
+    public let budget = RateLimitBudget()
 
     public init(config: HTTPClientConfig = HTTPClientConfig(), session: URLSession? = nil) {
         self.config = config
@@ -121,6 +123,14 @@ public final class HTTPClient: @unchecked Sendable {
         while true {
             await limiter.acquire()
 
+            // Apple's own accounting takes precedence over the local pace. When
+            // the reported budget runs low this spreads what is left across the
+            // rest of the rolling hour rather than letting the bucket burn it.
+            let conservationDelay = await budget.recommendedDelay()
+            if conservationDelay > 0 {
+                try await Task.sleep(nanoseconds: UInt64(conservationDelay * 1_000_000_000))
+            }
+
             let data: Data
             let response: URLResponse
             do {
@@ -139,6 +149,10 @@ public final class HTTPClient: @unchecked Sendable {
             guard let http = response as? HTTPURLResponse else {
                 throw APIError(kind: .transport, message: "Non-HTTP response")
             }
+
+            // Recorded on every response, including failures: a 429 carries the
+            // most important reading of all.
+            await budget.update(from: http.value(forHTTPHeaderField: "X-Rate-Limit"))
 
             if (200..<300).contains(http.statusCode) {
                 return data

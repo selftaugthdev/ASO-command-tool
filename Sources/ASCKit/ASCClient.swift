@@ -12,8 +12,13 @@ public final class ASCClient: @unchecked Sendable {
 
     public init(credentials: ASCCredentials, http: HTTPClient? = nil) throws {
         self.tokens = try ASCTokenProvider(credentials: credentials)
-        // App Store Connect permits ~3600 requests/hour; stay under it.
-        self.http = http ?? HTTPClient(config: HTTPClientConfig(requestsPerHour: 3000))
+        // Apple documents 7200 requests/hour for the App Store Connect API.
+        // The local pace is set just under that; the real governor is the
+        // `X-Rate-Limit` header on each response, which reports the actual
+        // remaining budget and accounts for consumption by anything else using
+        // the same key. Apple also applies undocumented per-endpoint and
+        // per-minute limits, so the header is the only trustworthy signal.
+        self.http = http ?? HTTPClient(config: HTTPClientConfig(requestsPerHour: 7000))
     }
 
     // MARK: - Request plumbing
