@@ -8,6 +8,7 @@ struct KeywordsView: View {
     @Environment(AppState.self) private var state
     @State private var newTerms = ""
     @State private var showingImport = false
+    @State private var showingPrune = false
     @State private var showingChart = true
     @State private var selection: Set<Int64> = []
     // Popularity descending by default: on a list of a few hundred imported
@@ -42,6 +43,7 @@ struct KeywordsView: View {
             }
         }
         .sheet(isPresented: $showingImport) { ImportView() }
+        .sheet(isPresented: $showingPrune) { PruneView() }
     }
 
     // MARK: Add bar
@@ -66,12 +68,29 @@ struct KeywordsView: View {
             .help("Import a keyword list exported from another ASO tool")
 
             Button {
+                showingPrune = true
+            } label: {
+                Label("Prune", systemImage: "scissors")
+            }
+            .disabled(state.keywords.isEmpty || state.isBusy)
+            .help("Remove keywords below a popularity threshold")
+
+            Button {
                 state.start { await state.refreshRanks() }
             } label: {
-                Label("Refresh Ranks", systemImage: "arrow.clockwise")
+                Label("Refresh", systemImage: "arrow.clockwise")
             }
             .disabled(state.keywords.isEmpty || state.isBusy)
             .help(refreshEstimateHelp)
+
+            Button {
+                state.start { await state.refreshAllApps() }
+            } label: {
+                Label("Refresh All", systemImage: "arrow.clockwise.circle.fill")
+            }
+            .disabled(state.isBusy)
+            .help("Refresh every keyword across every app and country, the way "
+                + "the daily job does")
 
             Button {
                 showingChart.toggle()

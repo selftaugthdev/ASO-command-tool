@@ -69,6 +69,9 @@ struct ASOCommandCenterApp: App {
                     // body: a Keychain prompt raised before the first draw
                     // leaves the app running with no window.
                     await state.refreshCredentialStatus()
+                    // Started after credentials so a due run does not race the
+                    // Keychain prompt.
+                    state.startScheduler()
                 }
         }
         .windowToolbarStyle(.unified)

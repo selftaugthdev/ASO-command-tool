@@ -12,6 +12,7 @@ struct SettingsView: View {
         case appStoreConnect = "App Store Connect"
         case searchAds = "Search Ads"
         case revenue = "Revenue"
+        case schedule = "Schedule"
         var id: String { rawValue }
     }
 
@@ -32,6 +33,7 @@ struct SettingsView: View {
                     case .appStoreConnect: ascSection
                     case .searchAds: asaSection
                     case .revenue: revenueSection
+                    case .schedule: scheduleSection
                     }
                 }
                 .padding(20)
@@ -138,6 +140,92 @@ struct SettingsView: View {
                + "attribution to RevenueCat. See Docs/AdServicesAttribution.md.")
                 .font(.caption)
                 .foregroundStyle(.orange)
+        }
+    }
+
+    private var scheduleSection: some View {
+        @Bindable var state = state
+
+        return VStack(alignment: .leading, spacing: 16) {
+            SectionHeader(
+                title: "Daily refresh",
+                subtitle: "Re-checks every keyword across every app, then flags "
+                        + "anything that moved. Rank trends need consecutive days "
+                        + "to mean anything, so this is what makes the charts useful.")
+
+            Toggle("Run a daily refresh", isOn: Binding(
+                get: { state.schedule.isEnabled },
+                set: { enabled in
+                    var updated = state.schedule
+                    updated.isEnabled = enabled
+                    state.updateSchedule(updated)
+                }))
+            .toggleStyle(.switch)
+
+            if state.schedule.isEnabled {
+                HStack(spacing: 10) {
+                    Text("At")
+                    Picker("Hour", selection: Binding(
+                        get: { state.schedule.hour },
+                        set: { hour in
+                            var updated = state.schedule
+                            updated.hour = hour
+                            state.updateSchedule(updated)
+                        })) {
+                        ForEach(0..<24, id: \.self) { hour in
+                            Text(String(format: "%02d:00", hour)).tag(hour)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(width: 100)
+
+                    Text("Next run \(state.schedule.describeNextRun())")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text("Alert when a keyword drops")
+                        Text("\(state.schedule.alertDropThreshold)")
+                            .font(.body.monospacedDigit().weight(.semibold))
+                        Text("places or more")
+                    }
+                    Slider(value: Binding(
+                        get: { Double(state.schedule.alertDropThreshold) },
+                        set: { value in
+                            var updated = state.schedule
+                            updated.alertDropThreshold = Int(value)
+                            state.updateSchedule(updated)
+                        }), in: 3...50, step: 1)
+                }
+
+                if let last = state.schedule.lastRun {
+                    Text("Last run \(last.formatted(date: .abbreviated, time: .shortened))")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Divider()
+
+            Text("""
+            The run happens while the app is open. If the Mac is asleep or the \
+            app is closed at that hour, the refresh is owed rather than skipped \
+            and starts the next time you open the app.
+
+            A sweep that is interrupted — sleep, lost connection, shutdown — \
+            keeps everything already checked and resumes where it stopped, so \
+            it never repeats hours of work.
+            """)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+
+            Button("Run now") {
+                state.start { await state.refreshAllApps() }
+            }
+            .disabled(state.isBusy)
         }
     }
 

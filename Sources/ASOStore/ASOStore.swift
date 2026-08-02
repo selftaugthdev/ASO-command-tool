@@ -280,6 +280,82 @@ public final class ASOStore: @unchecked Sendable {
         try database.run("DELETE FROM keywords WHERE id = ?;", [.int(id)])
     }
 
+    /// Keywords whose popularity falls below a threshold.
+    ///
+    /// `includeUnknown` is separate and defaults to false because a missing
+    /// popularity means "never measured", not "measured as low" — sweeping
+    /// those away by default would silently delete everything that has not been
+    /// researched yet.
+    public func lowPopularityKeywords(appId: String?, below threshold: Double,
+                                      includeUnknown: Bool) throws -> [TrackedKeyword] {
+        var sql = """
+            SELECT k.id, k.app_id, k.term, k.country, k.added_at,
+                   m.popularity, m.difficulty, m.competitors,
+                   (SELECT rank FROM rank_snapshots r WHERE r.keyword_id = k.id
+                     ORDER BY r.captured_at DESC LIMIT 1),
+                   (SELECT rank FROM rank_snapshots r WHERE r.keyword_id = k.id
+                     ORDER BY r.captured_at DESC LIMIT 1 OFFSET 1),
+                   m.source
+            FROM keywords k
+            LEFT JOIN keyword_metrics m ON m.keyword_id = k.id
+            WHERE k.is_tracked = 1
+            """
+        var parameters: [SQLValue] = []
+        if let appId {
+            sql += " AND k.app_id = ?"
+            parameters.append(.text(appId))
+        }
+        sql += includeUnknown
+            ? " AND (m.popularity IS NULL OR m.popularity < ?)"
+            : " AND m.popularity IS NOT NULL AND m.popularity < ?"
+        parameters.append(.double(threshold))
+        sql += " ORDER BY m.popularity, k.term;"
+
+        return try database.query(sql, parameters) { row in
+            var keyword = TrackedKeyword(id: row.int(0) ?? 0,
+                                         appId: row.string(1) ?? "",
+                                         term: row.string(2) ?? "",
+                                         country: row.string(3) ?? "us",
+                                         addedAt: row.date(4) ?? Date())
+            keyword.popularity = row.double(5)
+            keyword.difficulty = row.double(6)
+            keyword.competitors = row.int(7).map(Int.init)
+            keyword.currentRank = row.int(8).map(Int.init)
+            keyword.previousRank = row.int(9).map(Int.init)
+            keyword.popularitySource = row.string(10) ?? "unknown"
+            return keyword
+        }
+    }
+
+    /// Deletes the given keywords and their rank history.
+    @discardableResult
+    public func removeKeywords(ids: [Int64]) throws -> Int {
+        guard !ids.isEmpty else { return 0 }
+        try database.transaction {
+            for id in ids {
+                try database.run("DELETE FROM keywords WHERE id = ?;", [.int(id)])
+            }
+        }
+        return ids.count
+    }
+
+    /// Every (app, country) pair that actually has tracked keywords.
+    ///
+    /// Drives the scheduled sweep: refreshing a country an app has no keywords
+    /// in would burn rate limit for nothing.
+    public func trackedAppCountryPairs() throws -> [(appId: String, country: String, count: Int)] {
+        try database.query("""
+            SELECT k.app_id, k.country, COUNT(*)
+            FROM keywords k
+            JOIN apps a ON a.id = k.app_id
+            WHERE k.is_tracked = 1 AND a.is_tracked = 1
+            GROUP BY k.app_id, k.country
+            ORDER BY k.app_id, k.country;
+            """) { row in
+            (row.string(0) ?? "", row.string(1) ?? "us", Int(row.int(2) ?? 0))
+        }
+    }
+
     /// Keywords with their cached metrics and latest two ranks joined in.
     public func keywords(appId: String, country: String? = nil) throws -> [TrackedKeyword] {
         var sql = """
@@ -375,6 +451,22 @@ public final class ASOStore: @unchecked Sendable {
         try database.run("UPDATE rank_snapshots SET rank = NULL WHERE rank >= ?;",
                          [.int(Int64(threshold))])
         return affected
+    }
+
+    /// Keyword ids that already have a rank reading on or after `since`.
+    ///
+    /// Makes a sweep resumable. A two-hour run interrupted by sleep, a dropped
+    /// connection or a shutdown otherwise restarts from the beginning and
+    /// re-does work that is already saved.
+    public func keywordIdsWithRank(appId: String, country: String,
+                                   since: Date) throws -> Set<Int64> {
+        let ids = try database.query("""
+            SELECT DISTINCT r.keyword_id
+            FROM rank_snapshots r
+            JOIN keywords k ON k.id = r.keyword_id
+            WHERE k.app_id = ? AND k.country = ? AND r.captured_at >= ?;
+            """, [.text(appId), .text(country), .date(since)]) { $0.int(0) }
+        return Set(ids.compactMap { $0 })
     }
 
     public func rankHistory(keywordId: Int64, days: Int = 90) throws -> [RankPoint] {

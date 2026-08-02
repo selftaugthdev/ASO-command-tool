@@ -186,18 +186,53 @@ public final class KeywordResearcher: @unchecked Sendable {
         }
     }
 
+    /// What a sweep actually managed to do.
+    public struct RefreshOutcome: Sendable {
+        public init() {}
+
+        public var refreshed = 0
+        /// Already had a reading for the period, so skipped without a request.
+        public var alreadyFresh = 0
+        /// Individual lookups that failed and were passed over.
+        public var failed = 0
+        /// Set when the run stopped early because the network looked down.
+        public var abortedOffline = false
+
+        public var attempted: Int { refreshed + failed }
+    }
+
+    /// Consecutive failures treated as "the network is gone" rather than bad luck.
+    ///
+    /// Individual lookups fail for transient reasons and should be skipped, but
+    /// once this many in a row fail there is no point grinding through another
+    /// two thousand keywords to fail on each; better to stop and let the run
+    /// resume later.
+    private static let offlineFailureStreak = 8
+
     /// Re-checks rank for every tracked keyword of an app. Used by the daily job.
     ///
     /// Records a nil rank when the app is absent from results, which is
     /// meaningful data: it distinguishes "dropped out of the top 100" from
     /// "we did not check today".
+    ///
+    /// Individual failures are tolerated. A dropped connection, a closed lid or
+    /// a shutdown part way through must not lose the work already done or
+    /// abort the whole sweep, so each keyword is committed as it completes and
+    /// `skipRefreshedSince` lets a later run pick up where this one stopped.
     @discardableResult
     public func refreshRanks(
         for app: TrackedApp,
         country: String,
+        skipRefreshedSince: Date? = nil,
         onProgress: (@Sendable (Int, Int) async -> Void)? = nil
-    ) async throws -> [TrackedKeyword] {
+    ) async throws -> RefreshOutcome {
         let keywords = try store.keywords(appId: app.id, country: country)
+        let alreadyDone: Set<Int64> = try skipRefreshedSince.map {
+            try store.keywordIdsWithRank(appId: app.id, country: country, since: $0)
+        } ?? []
+
+        var outcome = RefreshOutcome()
+        var consecutiveFailures = 0
         await onProgress?(0, keywords.count)
 
         for (index, keyword) in keywords.enumerated() {
@@ -206,24 +241,44 @@ public final class KeywordResearcher: @unchecked Sendable {
             // written stays written.
             try Task.checkCancellation()
 
-            let results = try await search.search(term: keyword.term,
-                                                 country: country, limit: 100)
-            let rank = results.firstIndex { $0.id == app.id }.map { $0 + 1 }
-            try store.recordRank(keywordId: keyword.id, rank: rank)
+            if alreadyDone.contains(keyword.id) {
+                outcome.alreadyFresh += 1
+                await onProgress?(index + 1, keywords.count)
+                continue
+            }
 
-            // The same search result set already answers difficulty, so scoring
-            // it here costs no extra request. Imported keywords otherwise stay
-            // blank forever, because nothing else backfills them.
-            let difficulty = DifficultyScorer.score(results: results,
-                                                    term: keyword.term,
-                                                    requestedLimit: 100)
-            try store.updateCompetition(keywordId: keyword.id,
-                                        difficulty: difficulty,
-                                        competitors: results.count)
+            do {
+                let results = try await search.search(term: keyword.term,
+                                                     country: country, limit: 100)
+                let rank = results.firstIndex { $0.id == app.id }.map { $0 + 1 }
+                try store.recordRank(keywordId: keyword.id, rank: rank)
+
+                // The same search result set already answers difficulty, so
+                // scoring it here costs no extra request. Imported keywords
+                // otherwise stay blank forever, because nothing else backfills.
+                let difficulty = DifficultyScorer.score(results: results,
+                                                        term: keyword.term,
+                                                        requestedLimit: 100)
+                try store.updateCompetition(keywordId: keyword.id,
+                                            difficulty: difficulty,
+                                            competitors: results.count)
+
+                outcome.refreshed += 1
+                consecutiveFailures = 0
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                outcome.failed += 1
+                consecutiveFailures += 1
+                if consecutiveFailures >= Self.offlineFailureStreak {
+                    outcome.abortedOffline = true
+                    return outcome
+                }
+            }
 
             await onProgress?(index + 1, keywords.count)
         }
-        return try store.keywords(appId: app.id, country: country)
+        return outcome
     }
 
     /// Roughly how long one keyword lookup takes, for an up-front estimate.

@@ -40,9 +40,11 @@ final class AppState {
     var busyLabel = ""
     var status: StatusMessage?
     var progress: OperationProgress?
+    var schedule = SchedulePreferences.load()
 
     /// Handle for the running long operation, so it can be cancelled.
     private var runningTask: Task<Void, Never>?
+    private var scheduleTimer: Timer?
 
     let store: ASOStore
     let credentials = CredentialStore()
@@ -279,14 +281,191 @@ final class AppState {
 
         await run("Refreshing ranks for \(app.name)") {
             let researcher = KeywordResearcher(store: self.store)
-            let done = try await researcher.refreshRanks(
+            let outcome = try await researcher.refreshRanks(
                 for: app,
                 country: self.selectedCountry,
                 onProgress: { [weak self] completed, total in
                     await self?.updateProgress(completed: completed, total: total)
                 })
             self.reloadKeywords()
-            return .success("Ranks updated for \(done.count) keyword(s)")
+            return Self.describe(outcome, label: "Ranks updated")
+        }
+    }
+
+    /// Turns a sweep outcome into an honest one-line summary.
+    ///
+    /// Partial results are reported as partial rather than as success, so an
+    /// interrupted run is never mistaken for a complete one.
+    private static func describe(_ outcome: KeywordResearcher.RefreshOutcome,
+                                 label: String) -> Outcome {
+        var parts: [String] = ["\(label): \(outcome.refreshed) keyword(s)"]
+        if outcome.alreadyFresh > 0 {
+            parts.append("\(outcome.alreadyFresh) already current")
+        }
+        if outcome.failed > 0 {
+            parts.append("\(outcome.failed) failed")
+        }
+        let summary = parts.joined(separator: ", ") + "."
+
+        if outcome.abortedOffline {
+            return .warning(summary + " Stopped early after repeated network "
+                          + "failures. Everything done so far is saved; run it "
+                          + "again when you are back online and it will pick up "
+                          + "where it left off.")
+        }
+        if outcome.failed > 0 {
+            return .warning(summary + " The failures are saved as unchecked and "
+                          + "will be retried on the next run.")
+        }
+        return .success(summary)
+    }
+
+    /// Refreshes every tracked keyword across every app and country.
+    ///
+    /// This is what the scheduled job runs, and what the toolbar's "Refresh All"
+    /// does. Ranks are compared against the previous reading and material drops
+    /// are recorded as alerts, so a sweep produces something to act on rather
+    /// than just refreshed numbers.
+    func refreshAllApps(isScheduled: Bool = false) async {
+        let pairs = (try? store.trackedAppCountryPairs()) ?? []
+        let total = pairs.reduce(0) { $0 + $1.count }
+        guard total > 0 else {
+            if !isScheduled { report(.info, "No tracked keywords to refresh") }
+            return
+        }
+
+        let appsById = Dictionary(uniqueKeysWithValues: apps.map { ($0.id, $0) })
+        beginProgress(label: isScheduled ? "Daily refresh" : "Refreshing all apps",
+                      total: total)
+
+        // Anything already checked since midnight is skipped, so a sweep cut
+        // short by sleep, a dropped connection or a shutdown resumes rather
+        // than repeating hours of work.
+        let today = Calendar.utc.startOfDay(for: Date())
+
+        await run("Refreshing all apps") {
+            let researcher = KeywordResearcher(store: self.store)
+            var completedOverall = 0
+            var alertsRaised = 0
+            var appsCovered = 0
+            var combined = KeywordResearcher.RefreshOutcome()
+
+            for pair in pairs {
+                guard let app = appsById[pair.appId] else {
+                    completedOverall += pair.count
+                    continue
+                }
+                // Snapshot the ranks before the sweep so movement can be
+                // attributed afterwards.
+                let before = Dictionary(
+                    uniqueKeysWithValues: (try self.store.keywords(appId: pair.appId,
+                                                                   country: pair.country))
+                        .map { ($0.id, $0.currentRank) })
+
+                let baseline = completedOverall
+                let outcome = try await researcher.refreshRanks(
+                    for: app,
+                    country: pair.country,
+                    skipRefreshedSince: today,
+                    onProgress: { [weak self] completed, _ in
+                        await self?.updateProgress(completed: baseline + completed,
+                                                   total: total)
+                    })
+                completedOverall += pair.count
+                appsCovered += 1
+
+                combined.refreshed += outcome.refreshed
+                combined.alreadyFresh += outcome.alreadyFresh
+                combined.failed += outcome.failed
+                combined.abortedOffline = combined.abortedOffline || outcome.abortedOffline
+
+                alertsRaised += try self.raiseRankAlerts(appId: pair.appId,
+                                                        country: pair.country,
+                                                        previousRanks: before)
+
+                // Give up the whole sweep once the network is clearly gone,
+                // instead of failing through every remaining app.
+                if outcome.abortedOffline { break }
+            }
+
+            // Only count the day as done if the sweep actually completed;
+            // otherwise it stays due and resumes on the next check.
+            if !combined.abortedOffline {
+                self.schedule.lastRun = Date()
+                SchedulePreferences.save(self.schedule)
+            }
+            self.reloadKeywords()
+            self.reloadAlerts()
+
+            let alertNote = alertsRaised > 0
+                ? " \(alertsRaised) alert(s) raised."
+                : " Nothing moved enough to flag."
+            let base = Self.describe(combined,
+                                     label: "Swept \(appsCovered) app/country combination(s)")
+            switch base {
+            case .success(let text): return .success(text + alertNote)
+            case .warning(let text): return .warning(text + alertNote)
+            case .info(let text): return .info(text + alertNote)
+            }
+        }
+    }
+
+    /// Compares post-refresh ranks against a pre-refresh snapshot and records
+    /// alerts for material drops.
+    private func raiseRankAlerts(appId: String, country: String,
+                                 previousRanks: [Int64: Int?]) throws -> Int {
+        let threshold = schedule.alertDropThreshold
+        let appName = apps.first { $0.id == appId }?.name ?? appId
+        var raised = 0
+
+        for keyword in try store.keywords(appId: appId, country: country) {
+            guard let previous = previousRanks[keyword.id] ?? nil else { continue }
+
+            if let current = keyword.currentRank {
+                let drop = current - previous
+                guard drop >= threshold else { continue }
+                try store.recordAlert(
+                    appId: appId,
+                    kind: "rank_drop",
+                    title: "\(appName): \"\(keyword.term)\" dropped \(drop) places",
+                    body: "Now #\(current) in \(country.uppercased()), was #\(previous).",
+                    severity: drop >= threshold * 3 ? .critical : .warning)
+                raised += 1
+            } else {
+                // Falling out of the results entirely is the most severe case
+                // and has no numeric drop to compare, so it is checked
+                // separately rather than being skipped as a nil.
+                try store.recordAlert(
+                    appId: appId,
+                    kind: "rank_lost",
+                    title: "\(appName): \"\(keyword.term)\" left the top 100",
+                    body: "Was #\(previous) in \(country.uppercased()), now unranked.",
+                    severity: .critical)
+                raised += 1
+            }
+        }
+        return raised
+    }
+
+    // MARK: - Pruning
+
+    /// Keywords that a prune would delete, for the confirmation preview.
+    func lowPopularityPreview(threshold: Double, allApps: Bool,
+                              includeUnknown: Bool) -> [TrackedKeyword] {
+        (try? store.lowPopularityKeywords(appId: allApps ? nil : selectedAppId,
+                                          below: threshold,
+                                          includeUnknown: includeUnknown)) ?? []
+    }
+
+    /// Deletes the given keywords. Called only after explicit confirmation.
+    func removeKeywords(_ keywords: [TrackedKeyword]) {
+        guard !keywords.isEmpty else { return }
+        do {
+            let removed = try store.removeKeywords(ids: keywords.map(\.id))
+            reloadKeywords()
+            report(.success, "Removed \(removed) keyword(s).")
+        } catch {
+            report(.error, "Could not remove keywords: \(error.localizedDescription)")
         }
     }
 
@@ -323,6 +502,48 @@ final class AppState {
     }
 
     var canCancel: Bool { runningTask != nil && progress != nil }
+
+    // MARK: - Scheduling
+
+    /// Starts the schedule watcher and catches up on a missed run.
+    ///
+    /// The catch-up matters more than the timer: the Mac is usually asleep or
+    /// the app closed at whatever hour was picked, so most days the run is owed
+    /// at launch rather than fired live.
+    func startScheduler() {
+        scheduleTimer?.invalidate()
+
+        // Checked every five minutes rather than scheduled for the exact
+        // moment, so the schedule survives sleep, wake and clock changes
+        // without needing to reason about any of them.
+        scheduleTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { _ in
+            Task { @MainActor in self.runScheduledRefreshIfDue() }
+        }
+        runScheduledRefreshIfDue()
+    }
+
+    func stopScheduler() {
+        scheduleTimer?.invalidate()
+        scheduleTimer = nil
+    }
+
+    func runScheduledRefreshIfDue() {
+        guard schedule.isDue() else { return }
+        // Never interrupt work already in flight; the run stays due and the
+        // next check picks it up.
+        guard runningTask == nil, !isBusy else { return }
+        start { await self.refreshAllApps(isScheduled: true) }
+    }
+
+    func updateSchedule(_ newValue: DailySchedule) {
+        schedule = newValue
+        SchedulePreferences.save(schedule)
+        if schedule.isEnabled {
+            startScheduler()
+        } else {
+            stopScheduler()
+        }
+    }
 
     /// Pulls Search Ads spend for the selected app.
     func syncSpend(days: Int = 30) async {
