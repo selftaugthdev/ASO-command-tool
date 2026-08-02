@@ -43,18 +43,40 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(try store.keywords(appId: "123", country: "nl").count, 1)
     }
 
+    /// A fixed instant, not `Date()`. Anchoring to the wall clock made this
+    /// suite pass in the morning and fail in the evening: adding hours to "now"
+    /// crosses midnight UTC after 16:00, which correctly produces two day
+    /// buckets and looked like a product bug.
+    private func utc(_ iso: String) -> Date {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        return formatter.date(from: iso)!
+    }
+
     /// Two runs on the same day must update one row, not stack up points.
     func testRankSnapshotsCollapsePerDay() throws {
         let id = try store.addKeyword(appId: "123", term: "migraine", country: "us")
-        let morning = Date()
-        let evening = morning.addingTimeInterval(8 * 3600)
 
-        try store.recordRank(keywordId: id, rank: 12, at: morning)
-        try store.recordRank(keywordId: id, rank: 9, at: evening)
+        try store.recordRank(keywordId: id, rank: 12, at: utc("2026-03-10T08:00:00Z"))
+        try store.recordRank(keywordId: id, rank: 9, at: utc("2026-03-10T16:00:00Z"))
 
-        let history = try store.rankHistory(keywordId: id)
-        XCTAssertEqual(history.count, 1)
+        let history = try store.rankHistory(keywordId: id, days: 36_500)
+        XCTAssertEqual(history.count, 1, "same UTC day must collapse to one point")
         XCTAssertEqual(history.first?.rank, 9, "later reading should win")
+    }
+
+    /// The flip side: readings that genuinely straddle midnight UTC are separate
+    /// days and must both be kept, or a trend loses a point.
+    func testRankSnapshotsAcrossMidnightAreDistinctDays() throws {
+        let id = try store.addKeyword(appId: "123", term: "migraine", country: "us")
+
+        try store.recordRank(keywordId: id, rank: 12, at: utc("2026-03-10T23:30:00Z"))
+        try store.recordRank(keywordId: id, rank: 9, at: utc("2026-03-11T00:30:00Z"))
+
+        let history = try store.rankHistory(keywordId: id, days: 36_500)
+        XCTAssertEqual(history.count, 2)
+        XCTAssertEqual(history.map(\.rank), [12, 9], "ordered oldest first")
     }
 
     func testRankDeltaUsesTwoMostRecentPoints() throws {
