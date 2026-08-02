@@ -66,12 +66,12 @@ struct KeywordsView: View {
             .help("Import a keyword list exported from another ASO tool")
 
             Button {
-                Task { await state.refreshRanks() }
+                state.start { await state.refreshRanks() }
             } label: {
                 Label("Refresh Ranks", systemImage: "arrow.clockwise")
             }
             .disabled(state.keywords.isEmpty || state.isBusy)
-            .help("Re-check the store position of every tracked keyword")
+            .help(refreshEstimateHelp)
 
             Button {
                 showingChart.toggle()
@@ -86,6 +86,20 @@ struct KeywordsView: View {
         .background(.bar)
     }
 
+    /// Sets expectations before the click, not after: a few hundred keywords is
+    /// a genuinely long run and the button should say so.
+    private var refreshEstimateHelp: String {
+        guard !state.keywords.isEmpty else {
+            return "Re-check the store position of every tracked keyword"
+        }
+        let seconds = OperationProgress.initialEstimate(
+            itemCount: state.keywords.count,
+            secondsPerItem: KeywordResearcher.secondsPerKeywordLookup)
+        return "Re-check all \(state.keywords.count) keywords — "
+             + "takes \(OperationProgress.describe(seconds)). You can stop part way; "
+             + "whatever finished is saved."
+    }
+
     private func submit() {
         let terms = newTerms
             .split(whereSeparator: { $0 == "," || $0 == "\n" })
@@ -93,7 +107,7 @@ struct KeywordsView: View {
             .filter { !$0.isEmpty }
         guard !terms.isEmpty else { return }
         newTerms = ""
-        Task { await state.research(terms: terms) }
+        state.start { await state.research(terms: terms) }
     }
 
     // MARK: Table

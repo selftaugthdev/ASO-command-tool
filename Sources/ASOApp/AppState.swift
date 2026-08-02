@@ -15,6 +15,7 @@ struct StatusMessage: Identifiable, Equatable {
     var text: String
 }
 
+
 /// Central app state. Owns the store and lazily builds API clients from
 /// whatever credentials are present in the Keychain.
 @MainActor
@@ -38,6 +39,10 @@ final class AppState {
     var isBusy = false
     var busyLabel = ""
     var status: StatusMessage?
+    var progress: OperationProgress?
+
+    /// Handle for the running long operation, so it can be cancelled.
+    private var runningTask: Task<Void, Never>?
 
     let store: ASOStore
     let credentials = CredentialStore()
@@ -203,12 +208,17 @@ final class AppState {
     /// Researches new terms and stores them.
     func research(terms: [String]) async {
         guard let app = selectedApp, !terms.isEmpty else { return }
+        beginProgress(label: "Researching \(terms.count) keyword(s)", total: terms.count)
+
         await run("Researching \(terms.count) keyword(s)") {
             let researcher = KeywordResearcher(
                 store: self.store,
                 asa: self.hasASACredentials ? try? self.asaClient() : nil)
-            let insights = try await researcher.research(terms: terms, for: app,
-                                                         country: self.selectedCountry)
+            let insights = try await researcher.research(
+                terms: terms, for: app, country: self.selectedCountry,
+                onProgress: { [weak self] completed, total in
+                    await self?.updateProgress(completed: completed, total: total)
+                })
             try researcher.persist(insights, appId: app.id)
             self.reloadKeywords()
 
@@ -262,13 +272,57 @@ final class AppState {
     /// Re-checks rank for every tracked keyword.
     func refreshRanks() async {
         guard let app = selectedApp else { return }
+        let total = keywords.count
+        guard total > 0 else { return }
+
+        beginProgress(label: "Refreshing ranks for \(app.name)", total: total)
+
         await run("Refreshing ranks for \(app.name)") {
             let researcher = KeywordResearcher(store: self.store)
-            _ = try await researcher.refreshRanks(for: app, country: self.selectedCountry)
+            let done = try await researcher.refreshRanks(
+                for: app,
+                country: self.selectedCountry,
+                onProgress: { [weak self] completed, total in
+                    await self?.updateProgress(completed: completed, total: total)
+                })
             self.reloadKeywords()
-            return .success("Ranks updated for \(self.keywords.count) keyword(s)")
+            return .success("Ranks updated for \(done.count) keyword(s)")
         }
     }
+
+    // MARK: - Progress and cancellation
+
+    private func beginProgress(label: String, total: Int) {
+        progress = OperationProgress(label: label, completed: 0, total: total,
+                                     startedAt: Date())
+    }
+
+    func updateProgress(completed: Int, total: Int) {
+        guard progress != nil else { return }
+        progress?.completed = completed
+        progress?.total = total
+    }
+
+    /// Runs a long operation in a cancellable task.
+    ///
+    /// Views call this instead of wrapping the call in their own `Task`, so the
+    /// handle is retained here and a Stop button has something to cancel.
+    func start(_ operation: @escaping @MainActor () async -> Void) {
+        runningTask?.cancel()
+        runningTask = Task { @MainActor in
+            await operation()
+            self.runningTask = nil
+        }
+    }
+
+    /// Requests cancellation. The loop stops at its next iteration boundary, so
+    /// work already written to the database is kept rather than rolled back.
+    func cancelCurrentOperation() {
+        progress?.isCancelling = true
+        runningTask?.cancel()
+    }
+
+    var canCancel: Bool { runningTask != nil && progress != nil }
 
     /// Pulls Search Ads spend for the selected app.
     func syncSpend(days: Int = 30) async {
@@ -330,7 +384,7 @@ final class AppState {
     private func run(_ label: String, _ body: @escaping () async throws -> Outcome) async {
         isBusy = true
         busyLabel = label
-        defer { isBusy = false; busyLabel = "" }
+        defer { isBusy = false; busyLabel = ""; progress = nil }
 
         do {
             switch try await body() {
@@ -338,6 +392,13 @@ final class AppState {
             case .warning(let text): report(.warning, text)
             case .info(let text): report(.info, text)
             }
+        } catch is CancellationError {
+            // Stopping is a normal outcome, not a failure. Whatever completed
+            // before the stop is already saved.
+            let done = progress?.completed ?? 0
+            report(.info, done > 0
+                   ? "Stopped after \(done) keyword(s). Progress so far is saved."
+                   : "Stopped.")
         } catch let error as APIError {
             report(.error, Self.explain(error))
         } catch let error as KeychainError {

@@ -316,3 +316,66 @@ final class SentinelRankTests: XCTestCase {
         XCTAssertNil(try XCTUnwrap(byTerm["anxiety relief"]).rank)
     }
 }
+
+final class OperationProgressTests: XCTestCase {
+
+    private func progress(completed: Int, total: Int, elapsed: TimeInterval) -> OperationProgress {
+        OperationProgress(label: "Refreshing", completed: completed, total: total,
+                          startedAt: Date().addingTimeInterval(-elapsed))
+    }
+
+    func testFractionIsBounded() {
+        XCTAssertEqual(progress(completed: 0, total: 100, elapsed: 0).fraction, 0)
+        XCTAssertEqual(progress(completed: 50, total: 100, elapsed: 1).fraction, 0.5)
+        XCTAssertEqual(progress(completed: 150, total: 100, elapsed: 1).fraction, 1,
+                       "must not exceed 1 if callbacks overshoot")
+    }
+
+    func testFractionWithZeroTotalDoesNotDivideByZero() {
+        XCTAssertEqual(progress(completed: 0, total: 0, elapsed: 0).fraction, 0)
+    }
+
+    /// One or two samples give a wild figure, so no estimate is shown until the
+    /// rate has settled.
+    func testNoEstimateUntilEnoughSamples() {
+        XCTAssertNil(progress(completed: 1, total: 100, elapsed: 4).estimatedRemaining)
+        XCTAssertNotNil(progress(completed: 10, total: 100, elapsed: 36).estimatedRemaining)
+    }
+
+    func testEstimateExtrapolatesMeasuredRate() throws {
+        // 10 done in 36s is 3.6s each; 90 left should read as about 324s.
+        let remaining = try XCTUnwrap(
+            progress(completed: 10, total: 100, elapsed: 36).estimatedRemaining)
+        XCTAssertEqual(remaining, 324, accuracy: 5)
+    }
+
+    func testNoEstimateOnceComplete() {
+        XCTAssertNil(progress(completed: 100, total: 100, elapsed: 360).estimatedRemaining)
+    }
+
+    func testDurationWording() {
+        XCTAssertEqual(OperationProgress.describe(30), "under a minute")
+        XCTAssertEqual(OperationProgress.describe(300), "about 5 min")
+        XCTAssertEqual(OperationProgress.describe(1080), "about 18 min")
+        XCTAssertTrue(OperationProgress.describe(7200).contains("hr"))
+    }
+
+    /// The up-front estimate is what sets expectations before the click.
+    func testInitialEstimateMatchesLimiterPace() {
+        let seconds = OperationProgress.initialEstimate(itemCount: 302, secondsPerItem: 3.6)
+        XCTAssertEqual(seconds, 1087.2, accuracy: 0.1)
+        XCTAssertEqual(OperationProgress.describe(seconds), "about 18 min")
+    }
+
+    func testCancellingStateOverridesDetail() {
+        var p = progress(completed: 5, total: 100, elapsed: 18)
+        p.isCancelling = true
+        XCTAssertEqual(p.detail, "Stopping…")
+    }
+
+    func testDetailShowsCountAndEstimate() {
+        let detail = progress(completed: 10, total: 100, elapsed: 36).detail
+        XCTAssertTrue(detail.contains("10 of 100"))
+        XCTAssertTrue(detail.contains("left"))
+    }
+}

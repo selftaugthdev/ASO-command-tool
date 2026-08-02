@@ -65,11 +65,20 @@ struct ImportView: View {
             Divider()
 
             HStack {
-                Toggle("Look up rank and difficulty after importing",
-                       isOn: $researchAfterImport)
-                    .toggleStyle(.checkbox)
-                    .help("Adds one store lookup per keyword, so a large list takes a while. "
-                        + "Leave off to import the terms now and refresh ranks later.")
+                VStack(alignment: .leading, spacing: 2) {
+                    Toggle("Look up rank and difficulty after importing",
+                           isOn: $researchAfterImport)
+                        .toggleStyle(.checkbox)
+                    if researchAfterImport, let count = result?.keywords.count, count > 0 {
+                        let seconds = OperationProgress.initialEstimate(
+                            itemCount: count,
+                            secondsPerItem: KeywordResearcher.secondsPerKeywordLookup)
+                        Text("\(count) lookups, \(OperationProgress.describe(seconds)). "
+                           + "You can stop part way.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
                 Spacer()
                 Button("Cancel") { dismiss() }
                     .keyboardShortcut(.cancelAction)
@@ -137,7 +146,7 @@ struct ImportView: View {
         let keywords = result.keywords
         dismiss()
 
-        Task {
+        state.start {
             // Import first so the terms and any supplied volume land even if a
             // long research pass is interrupted part way through.
             await state.importKeywords(keywords)

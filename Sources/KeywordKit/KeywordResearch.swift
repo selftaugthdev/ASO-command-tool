@@ -122,7 +122,9 @@ public final class KeywordResearcher: @unchecked Sendable {
     /// because its recommendations endpoint returns popularity for many terms
     /// in a single call.
     public func research(terms: [String], for app: TrackedApp,
-                         country: String = "us") async throws -> [KeywordInsight] {
+                         country: String = "us",
+                         onProgress: (@Sendable (Int, Int) async -> Void)? = nil
+    ) async throws -> [KeywordInsight] {
         var popularityByTerm: [String: (popularity: Double?, bid: Double?)] = [:]
         if let asa {
             // A Search Ads failure must not sink the whole research run; the
@@ -139,7 +141,11 @@ public final class KeywordResearcher: @unchecked Sendable {
         }
 
         var insights: [KeywordInsight] = []
-        for term in terms {
+        await onProgress?(0, terms.count)
+
+        for (index, term) in terms.enumerated() {
+            try Task.checkCancellation()
+
             let normalized = term.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             guard !normalized.isEmpty else { continue }
 
@@ -159,6 +165,8 @@ public final class KeywordResearcher: @unchecked Sendable {
                 competitorCount: results.count,
                 rank: rank,
                 suggestedBid: apple?.bid))
+
+            await onProgress?(index + 1, terms.count)
         }
         return insights
     }
@@ -184,9 +192,20 @@ public final class KeywordResearcher: @unchecked Sendable {
     /// meaningful data: it distinguishes "dropped out of the top 100" from
     /// "we did not check today".
     @discardableResult
-    public func refreshRanks(for app: TrackedApp, country: String) async throws -> [TrackedKeyword] {
+    public func refreshRanks(
+        for app: TrackedApp,
+        country: String,
+        onProgress: (@Sendable (Int, Int) async -> Void)? = nil
+    ) async throws -> [TrackedKeyword] {
         let keywords = try store.keywords(appId: app.id, country: country)
-        for keyword in keywords {
+        await onProgress?(0, keywords.count)
+
+        for (index, keyword) in keywords.enumerated() {
+            // Checked per iteration so a stop takes effect within one request
+            // rather than at the end of a twenty-minute run. Everything already
+            // written stays written.
+            try Task.checkCancellation()
+
             let results = try await search.search(term: keyword.term,
                                                  country: country, limit: 100)
             let rank = results.firstIndex { $0.id == app.id }.map { $0 + 1 }
@@ -201,9 +220,18 @@ public final class KeywordResearcher: @unchecked Sendable {
             try store.updateCompetition(keywordId: keyword.id,
                                         difficulty: difficulty,
                                         competitors: results.count)
+
+            await onProgress?(index + 1, keywords.count)
         }
         return try store.keywords(appId: app.id, country: country)
     }
+
+    /// Roughly how long one keyword lookup takes, for an up-front estimate.
+    ///
+    /// Apple soft-limits the unauthenticated search endpoint, and the client's
+    /// rate limiter paces requests to stay under it, so throughput is close to
+    /// constant and this is a fair predictor before any samples exist.
+    public static let secondsPerKeywordLookup: Double = 3.6
 }
 
 // MARK: - Competitor analysis

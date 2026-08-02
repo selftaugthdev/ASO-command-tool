@@ -38,14 +38,7 @@ struct ContentView: View {
                     StatusBanner(message: status) { state.status = nil }
                 }
                 if state.isBusy {
-                    HStack(spacing: 8) {
-                        ProgressView().controlSize(.small)
-                        Text(state.busyLabel).font(.callout).foregroundStyle(.secondary)
-                        Spacer()
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 8)
-                    .background(.quaternary.opacity(0.4))
+                    BusyBar()
                 }
 
                 if state.selectedApp == nil {
@@ -192,6 +185,53 @@ enum Countries {
 
     static func label(for code: String) -> String {
         tracked.first { $0.code == code }?.label ?? code.uppercased()
+    }
+}
+
+/// Shows a determinate bar with a time estimate when the operation reports
+/// progress, and falls back to a spinner for short indeterminate work.
+struct BusyBar: View {
+    @Environment(AppState.self) private var state
+    /// Drives a re-render each second so the estimate counts down rather than
+    /// freezing between the (much slower) progress callbacks.
+    @State private var tick = Date()
+    private let timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+
+    var body: some View {
+        HStack(spacing: 12) {
+            if let progress = state.progress, progress.total > 0 {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 8) {
+                        Text(progress.label)
+                            .font(.callout.weight(.medium))
+                        Text(progress.detail)
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Text("\(Int(progress.fraction * 100))%")
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                    ProgressView(value: progress.fraction)
+                        .progressViewStyle(.linear)
+                }
+
+                Button("Stop") { state.cancelCurrentOperation() }
+                    .disabled(progress.isCancelling)
+                    .help("Stop after the current keyword. Work already done is saved.")
+            } else {
+                ProgressView().controlSize(.small)
+                Text(state.busyLabel)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                Spacer()
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .background(.quaternary.opacity(0.4))
+        .onReceive(timer) { tick = $0 }
+        .id(tick)
     }
 }
 
