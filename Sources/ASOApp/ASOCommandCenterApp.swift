@@ -1,5 +1,32 @@
 import SwiftUI
+import AppKit
 import ASOStore
+
+/// Drops persisted split-view geometry that is taller than the screen.
+///
+/// AppKit autosaves split-view subview frames per window. If a layout ever
+/// reports a height larger than the display, that value is restored on every
+/// later launch and pushes the toolbar and column headers off the top, leaving
+/// a window that looks broken with no way to recover from the UI. The frames
+/// are only a convenience, so discarding a nonsensical one is always safe.
+private func discardOversizedSplitState() {
+    let maxHeight = (NSScreen.screens.map(\.frame.height).max() ?? 1200) * 1.5
+    let defaults = UserDefaults.standard
+
+    for (key, value) in defaults.dictionaryRepresentation()
+    where key.hasPrefix("NSSplitView Subview Frames") {
+        guard let frames = value as? [String] else { continue }
+        // Each entry is "x, y, width, height, collapsed, collapsed".
+        let isOversized = frames.contains { frame in
+            let parts = frame.split(separator: ",").map {
+                $0.trimmingCharacters(in: .whitespaces)
+            }
+            guard parts.count >= 4, let height = Double(parts[3]) else { return false }
+            return height > maxHeight
+        }
+        if isOversized { defaults.removeObject(forKey: key) }
+    }
+}
 
 @main
 struct ASOCommandCenterApp: App {
@@ -7,6 +34,7 @@ struct ASOCommandCenterApp: App {
     @State private var startupError: String?
 
     init() {
+        discardOversizedSplitState()
         do {
             let store = try ASOStore.standard()
             _state = State(initialValue: AppState(store: store))

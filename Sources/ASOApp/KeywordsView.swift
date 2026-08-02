@@ -8,6 +8,7 @@ struct KeywordsView: View {
     @Environment(AppState.self) private var state
     @State private var newTerms = ""
     @State private var showingImport = false
+    @State private var showingChart = true
     @State private var selection: Set<Int64> = []
     // Popularity descending by default: on a list of a few hundred imported
     // terms, alphabetical order buries the handful actually worth working on.
@@ -23,14 +24,21 @@ struct KeywordsView: View {
         // The add bar sits in the VStack rather than as a safeAreaInset so it
         // occupies real layout space; as an inset the table scrolled beneath it
         // and hid its own column headers.
+        // Deliberately not a VSplitView. That control asks its children for an
+        // ideal height and autosaves the result against the window; once a tall
+        // value was persisted it forced the whole detail pane past the window
+        // height on every later launch, pushing the toolbar and column headers
+        // off the top of the screen. A fixed-height, collapsible chart cannot
+        // report a height the window does not have.
         VStack(spacing: 0) {
             addBar
             Divider()
-            VSplitView {
-                table
-                    .frame(minHeight: 240)
+            table
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            if showingChart {
+                Divider()
                 chart
-                    .frame(minHeight: 180)
+                    .frame(height: 200)
             }
         }
         .sheet(isPresented: $showingImport) { ImportView() }
@@ -64,6 +72,15 @@ struct KeywordsView: View {
             }
             .disabled(state.keywords.isEmpty || state.isBusy)
             .help("Re-check the store position of every tracked keyword")
+
+            Button {
+                showingChart.toggle()
+            } label: {
+                Label("Chart", systemImage: showingChart
+                      ? "chart.xyaxis.line" : "chart.xyaxis.line")
+                    .foregroundStyle(showingChart ? Color.accentColor : .secondary)
+            }
+            .help(showingChart ? "Hide the rank trend chart" : "Show the rank trend chart")
         }
         .padding(12)
         .background(.bar)
