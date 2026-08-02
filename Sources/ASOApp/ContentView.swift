@@ -33,33 +33,19 @@ struct ContentView: View {
         NavigationSplitView {
             sidebar
         } detail: {
-            VStack(spacing: 0) {
-                if let status = state.status {
-                    StatusBanner(message: status) { state.status = nil }
-                }
-                if state.isBusy {
-                    BusyBar()
-                }
-
-                if state.selectedApp == nil {
-                    EmptyWorkspace(showingSettings: $showingSettings)
-                } else {
-                    // Workspace switching lives here rather than in the sidebar.
-                    // Two independent selections inside one sidebar List fought
-                    // each other and drew rows outside the List's bounds.
-                    Picker("View", selection: $workspace) {
-                        ForEach(Workspace.allCases) { item in
-                            Label(item.rawValue, systemImage: item.icon).tag(item)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-
-                    Divider()
-                    detailContent
-                }
+            // GeometryReader pins the detail pane to the height the split view
+            // actually has. Without a definite height here the chain proposes
+            // unbounded height downward, the Table answers with its own ideal
+            // (row count x row height, ~2000pt once a few hundred keywords are
+            // imported), and AppKit autosaves that as the split geometry — which
+            // is then restored on the next layout, so the pane keeps growing and
+            // the toolbar and column headers get pushed off the top. An empty
+            // table never reports a tall ideal, which is why this only ever
+            // appeared straight after a CSV import.
+            GeometryReader { geometry in
+                detailStack
+                    .frame(width: geometry.size.width, height: geometry.size.height,
+                           alignment: .top)
             }
             // The app name belongs in the window title, not a .navigation
             // toolbar item, which draws on top of the title rather than beside it.
@@ -82,6 +68,42 @@ struct ContentView: View {
             state.reloadKeywords()
             state.reloadRevenue()
             state.reloadAlerts()
+        }
+    }
+
+    /// The detail pane's contents, sized by the GeometryReader that hosts it.
+    private var detailStack: some View {
+        @Bindable var state = state
+
+        return VStack(spacing: 0) {
+            if let status = state.status {
+                StatusBanner(message: status) { state.status = nil }
+            }
+            if state.isBusy {
+                BusyBar()
+            }
+
+            if state.selectedApp == nil {
+                EmptyWorkspace(showingSettings: $showingSettings)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                // Workspace switching lives here rather than in the sidebar.
+                // Two independent selections inside one sidebar List fought
+                // each other and drew rows outside the List's bounds.
+                Picker("View", selection: $workspace) {
+                    ForEach(Workspace.allCases) { item in
+                        Label(item.rawValue, systemImage: item.icon).tag(item)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+
+                Divider()
+                detailContent
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
         }
     }
 
